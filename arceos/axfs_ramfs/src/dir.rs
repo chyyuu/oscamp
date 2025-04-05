@@ -67,6 +67,24 @@ impl DirNode {
         children.remove(name);
         Ok(())
     }
+
+    /// Rename a node by the given name in this directory.
+    pub fn rename_node(&self, old: &str, new: &str) -> VfsResult {
+        // NOTE: Now just support rename, NOT move.
+        // So only reserve the last name of the new path.
+        let new = last_name(new);
+        let mut children = self.children.write();
+        let node = children.get(old).ok_or(VfsError::NotFound)?;
+        if let Some(dir) = node.as_any().downcast_ref::<DirNode>() {
+            if !dir.children.read().is_empty() {
+                return Err(VfsError::DirectoryNotEmpty);
+            }
+        }
+        let new_node = node.clone();
+        children.remove(old);
+        children.insert(new.into(), new_node);
+        Ok(())
+    }
 }
 
 impl VfsNodeOps for DirNode {
@@ -165,6 +183,30 @@ impl VfsNodeOps for DirNode {
         }
     }
 
+    fn rename(&self, src: &str, dst: &str) -> VfsResult {
+        log::debug!("rename to {} at ramfs: {}", dst, src);
+        let (name, rest) = split_path(src);
+        if let Some(rest) = rest {
+            match name {
+                "" | "." => self.rename(rest, dst),
+                ".." => self.parent().ok_or(VfsError::NotFound)?.rename(rest, dst),
+                _ => {
+                    let subdir = self
+                        .children
+                        .read()
+                        .get(name)
+                        .ok_or(VfsError::NotFound)?
+                        .clone();
+                    subdir.rename(rest, dst)
+                }
+            }
+        } else if name.is_empty() || name == "." || name == ".." {
+            Err(VfsError::InvalidInput) // remove '.' or '..
+        } else {
+            self.rename_node(name, dst)
+        }
+    }
+
     axfs_vfs::impl_vfs_dir_default! {}
 }
 
@@ -173,4 +215,13 @@ fn split_path(path: &str) -> (&str, Option<&str>) {
     trimmed_path.find('/').map_or((trimmed_path, None), |n| {
         (&trimmed_path[..n], Some(&trimmed_path[n + 1..]))
     })
+}
+
+fn last_name(path: &str) -> &str {
+    let trimmed_path = path.trim_end_matches('/');
+    if let Some(n) = trimmed_path.rfind('/') {
+        &trimmed_path[(n + 1)..]
+    } else {
+        trimmed_path
+    }
 }
