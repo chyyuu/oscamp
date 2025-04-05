@@ -3,11 +3,14 @@
 use core::ffi::{c_void, c_char, c_int};
 use axhal::arch::TrapFrame;
 use axhal::trap::{register_trap_handler, SYSCALL};
+use memory_addr::VirtAddrRange;
+use axhal::mem::{VirtAddr, phys_to_virt, PAGE_SIZE_4K};
 use axerrno::LinuxError;
 use axtask::current;
 use axtask::TaskExtRef;
 use axhal::paging::MappingFlags;
 use arceos_posix_api as api;
+use memory_addr::MemoryAddr;
 
 const SYS_IOCTL: usize = 29;
 const SYS_OPENAT: usize = 56;
@@ -131,7 +134,6 @@ fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
     ret
 }
 
-#[allow(unused_variables)]
 fn sys_mmap(
     addr: *mut usize,
     length: usize,
@@ -140,7 +142,58 @@ fn sys_mmap(
     fd: i32,
     _offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    syscall_body!(sys_mmap, {
+        let curr = current();
+        let curr_ext = curr.task_ext();
+        let mut aspace = curr_ext.aspace.lock();
+        let permission_flags = MmapProt::from_bits_truncate(prot);
+        let length = VirtAddr::from(length).align_up_4k().as_usize();
+        // TODO: check illegal flags for mmap
+        // An example is the flags contained none of MAP_PRIVATE, MAP_SHARED, or MAP_SHARED_VALIDATE.
+        let map_flags = MmapFlags::from_bits_truncate(flags);
+
+        let start_addr = if map_flags.contains(MmapFlags::MAP_FIXED) {
+            VirtAddr::from(addr as usize)
+        } else {
+            aspace
+                .find_free_area(
+                    VirtAddr::from(addr as usize),
+                    length,
+                    VirtAddrRange::new(aspace.base(), aspace.end()),
+                )
+                .or(aspace.find_free_area(
+                    aspace.base(),
+                    length,
+                    VirtAddrRange::new(aspace.base(), aspace.end()),
+                ))
+                .ok_or(LinuxError::ENOMEM)?
+        };
+
+        aspace.map_alloc(start_addr, length, permission_flags.into(), true)?;
+
+        // TODO: temporary solution. Find more proper method.
+        let f = api::get_file_like(fd)?;
+        let mut buf = [0u8; PAGE_SIZE_4K];
+        let ret = f.read(&mut buf)?;
+        assert!(ret < PAGE_SIZE_4K);
+
+        let (paddr, _, _) = aspace
+            .page_table()
+            .query(start_addr)
+            .unwrap_or_else(|_| panic!("Mapping failed for segment: {:#x}", start_addr));
+
+        ax_println!("paddr: {:#x}", paddr);
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                phys_to_virt(paddr).as_mut_ptr(),
+                ret,
+            );
+        }
+
+        Ok(start_addr.as_usize())
+    })
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {
