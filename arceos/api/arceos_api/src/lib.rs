@@ -32,6 +32,7 @@ pub mod sys {
     define_api! {
         /// Shutdown the whole system and all CPUs.
         pub fn ax_terminate() -> !;
+        pub fn ax_random() -> u128;
     }
 }
 

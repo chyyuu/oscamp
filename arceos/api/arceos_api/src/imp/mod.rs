@@ -45,4 +45,5 @@ pub use self::task::*;
 pub use self::time::*;
 
 pub use axhal::misc::terminate as ax_terminate;
+pub use axhal::misc::random as ax_random;
 pub use axio::PollState as AxPollState;
